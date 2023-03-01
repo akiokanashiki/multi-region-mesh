@@ -1,7 +1,7 @@
 import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 import { EndpointType, HttpIntegration, RestApi, VpcLink } from "aws-cdk-lib/aws-apigateway";
-import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, IMesh, IVirtualGateway, IVirtualService, Mesh, ServiceDiscovery, VirtualGatewayListener, VirtualNodeListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
-import { Alarm, ComparisonOperator, Metric, Stats } from "aws-cdk-lib/aws-cloudwatch";
+import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, HealthCheck, HttpRetryEvent, IMesh, IVirtualGateway, IVirtualService, Mesh, RouteSpec, ServiceDiscovery, TcpRetryEvent, VirtualGatewayListener, VirtualNodeListener, VirtualRouterListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
+import { Alarm, ComparisonOperator, Metric, Stats, TreatMissingData } from "aws-cdk-lib/aws-cloudwatch";
 import { GatewayVpcEndpointAwsService, InterfaceVpcEndpointAwsService, Peer, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository } from "aws-cdk-lib/aws-ecr";
 import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver } from "aws-cdk-lib/aws-ecs";
@@ -21,7 +21,11 @@ export class RegionalStack extends Stack {
 
         // prepare basic resources
         const vpc = Vpc.fromLookup(this, 'Vpc', { vpcId: props.vpcId });
-        const cluster = new Cluster(this, 'Cluster', { vpc, containerInsights: true, defaultCloudMapNamespace: { name: `${props.region}.local` } });
+        const cluster = new Cluster(this, 'Cluster', {
+            vpc, containerInsights: true, defaultCloudMapNamespace: {
+                name: `${props.region}.net`
+            }
+        });
         const hostedZone = PrivateHostedZone.fromHostedZoneAttributes(this, 'ServiceMeshZone', props.serviceMeshZone)
         const mesh = new Mesh(this, 'Mesh');
 
@@ -38,7 +42,7 @@ export class RegionalStack extends Stack {
         vpc.addInterfaceEndpoint('ec2msg', { service: InterfaceVpcEndpointAwsService.EC2_MESSAGES });
 
         // deploy load balancer
-        const loadBalancer = new NetworkLoadBalancer(scope, 'NetworkLoadBalancer', {
+        const loadBalancer = new NetworkLoadBalancer(this, 'NetworkLoadBalancer', {
             vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED }, internetFacing: false,
         });
 
@@ -175,18 +179,41 @@ export class RegionalStack extends Stack {
         service: IVirtualService,
     } {
         const scope = new Construct(this, args.serviceName);
+        const serviceDomain = `${args.serviceName}.${args.hostedZone.zoneName}`;
         const hostname = `${args.serviceName}.${args.cluster.defaultCloudMapNamespace!.namespaceName}`;
         const containerPort = 3000;
 
         // define mesh
-        const node = args.mesh.addVirtualNode(args.serviceName, {
-            serviceDiscovery: ServiceDiscovery.dns(hostname, DnsResponseType.ENDPOINTS),
-            listeners: [VirtualNodeListener.http({ port: containerPort })],
+        const node = args.mesh.addVirtualNode(`${args.serviceName}Node`, {
+            serviceDiscovery: ServiceDiscovery.dns(serviceDomain, DnsResponseType.ENDPOINTS),
+            listeners: [VirtualNodeListener.http({ port: containerPort, healthCheck: HealthCheck.http({
+                    path: '/health',
+                    interval: Duration.seconds(5),
+                    unhealthyThreshold: 2,
+                    healthyThreshold: 3,
+                    timeout: Duration.seconds(2),
+                })
+            })],
             accessLog: AccessLog.fromFilePath('/dev/stdout'),
         });
+        const router = args.mesh.addVirtualRouter(`${args.serviceName}Router`, {
+            listeners: [VirtualRouterListener.http(containerPort)],
+        });
+        router.addRoute('node', {
+            routeSpec: RouteSpec.http({
+                weightedTargets: [{ virtualNode: node }],
+                timeout: { perRequest: Duration.seconds(30) },
+                retryPolicy: {
+                    tcpRetryEvents: [TcpRetryEvent.CONNECTION_ERROR],
+                    httpRetryEvents: [HttpRetryEvent.STREAM_ERROR, HttpRetryEvent.GATEWAY_ERROR],
+                    retryAttempts: 5,
+                    retryTimeout: Duration.seconds(2),
+                }
+            })
+        });
         const service = new VirtualService(scope, 'VirtualService', {
-            virtualServiceName: hostname,
-            virtualServiceProvider: VirtualServiceProvider.virtualNode(node),
+            virtualServiceName: serviceDomain,
+            virtualServiceProvider: VirtualServiceProvider.virtualRouter(router),
         });
 
         // deploy container
@@ -254,28 +281,20 @@ export class RegionalStack extends Stack {
             taskDefinition, cluster: args.cluster, cloudMapOptions: { name: args.serviceName }
         });
         taskSet.connections.allowFrom(Peer.anyIpv4(), Port.tcp(containerPort));
-
-        // connect tasks and load balancer
-        const targetGroup = new NetworkTargetGroup(scope, 'TargetGroup', {
-            vpc: args.cluster.vpc, port: containerPort,
-            targetType: TargetType.IP, targets: [taskSet],
-            deregistrationDelay: Duration.seconds(0),
-        });
-
-        // healthcheck
         const alarm = new Alarm(scope, 'Alarm', {
             metric: new Metric({
-                namespace: 'ECS/InsightsContainerInsights',
+                namespace: 'ECS/ContainerInsights',
                 metricName: 'RunningTaskCount',
                 dimensionsMap: {
                     ClusterName: args.cluster.clusterName,
                     ServiceName: taskSet.serviceName,
-                }
-            }).with({ period: Duration.minutes(1), statistic: Stats.AVERAGE, }),
+                },
+            }).with({ period: Duration.minutes(1), statistic: Stats.MINIMUM, }),
             threshold: 1,
             comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
             evaluationPeriods: 1,
             datapointsToAlarm: 1,
+            treatMissingData: TreatMissingData.BREACHING,
         });
         const healtcheck = new CfnHealthCheck(scope, 'HealthCheck', {
             healthCheckConfig: {
@@ -284,7 +303,7 @@ export class RegionalStack extends Stack {
                     region: args.region,
                     name: alarm.alarmName,
                 },
-                insufficientDataHealthStatus: 'LastKnownStatus',
+                insufficientDataHealthStatus: 'Unhealthy',
             }
         });
 
