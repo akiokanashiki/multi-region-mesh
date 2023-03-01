@@ -1,0 +1,130 @@
+{
+  "availability-zones:account=346929044083:region=ap-northeast-1": [
+    "ap-northeast-1a",
+    "ap-northeast-1c",
+    "ap-northeast-1d"
+  ],
+  "availability-zones:account=346929044083:region=ap-northeast-3": [
+    "ap-northeast-3a",
+    "ap-northeast-3b",
+    "ap-northeast-3c"
+  ],
+  "hosted-zone:account=346929044083:domainName=hnd.local:privateZone=true:region=ap-northeast-1": {
+    "Id": "/hostedzone/Z08215611ORLMT0WM7X5P",
+    "Name": "hnd.local."
+  },
+  "hosted-zone:account=346929044083:domainName=kix.local:privateZone=true:region=ap-northeast-3": {
+    "Id": "/hostedzone/Z087967419RQC74GEL17U",
+    "Name": "kix.local."
+  },
+  "vpc-provider:account=346929044083:filter.vpc-id=vpc-07bcfd02df2db2a36:region=ap-northeast-1:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-07bcfd02df2db2a36",
+    "vpcCidrBlock": "192.168.0.0/17",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "Public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-0404008a7c2f59f90",
+            "cidr": "192.168.0.0/21",
+            "availabilityZone": "ap-northeast-1a",
+            "routeTableId": "rtb-0f6f9cb85e068c8b4"
+          },
+          {
+            "subnetId": "subnet-0ae60c74c773c067a",
+            "cidr": "192.168.8.0/21",
+            "availabilityZone": "ap-northeast-1c",
+            "routeTableId": "rtb-0f6f9cb85e068c8b4"
+          },
+          {
+            "subnetId": "subnet-085a8b9153e56ace4",
+            "cidr": "192.168.16.0/21",
+            "availabilityZone": "ap-northeast-1d",
+            "routeTableId": "rtb-0f6f9cb85e068c8b4"
+          }
+        ]
+      },
+      {
+        "name": "Isolated",
+        "type": "Isolated",
+        "subnets": [
+          {
+            "subnetId": "subnet-0e511605ff2c3f7d8",
+            "cidr": "192.168.64.0/21",
+            "availabilityZone": "ap-northeast-1a",
+            "routeTableId": "rtb-080ac9e40f9816304"
+          },
+          {
+            "subnetId": "subnet-029c155a3385dcf74",
+            "cidr": "192.168.72.0/21",
+            "availabilityZone": "ap-northeast-1c",
+            "routeTableId": "rtb-003074c71bc71b796"
+          },
+          {
+            "subnetId": "subnet-0de35c1c307deab8c",
+            "cidr": "192.168.80.0/21",
+            "availabilityZone": "ap-northeast-1d",
+            "routeTableId": "rtb-000a04e808c6c2d9a"
+          }
+        ]
+      }
+    ]
+  },
+  "vpc-provider:account=346929044083:filter.vpc-id=vpc-0080767fc5c8031cd:region=ap-northeast-3:returnAsymmetricSubnets=true": {
+    "vpcId": "vpc-0080767fc5c8031cd",
+    "vpcCidrBlock": "192.168.128.0/17",
+    "availabilityZones": [],
+    "subnetGroups": [
+      {
+        "name": "Public",
+        "type": "Public",
+        "subnets": [
+          {
+            "subnetId": "subnet-028afd124fb2c3a7b",
+            "cidr": "192.168.128.0/21",
+            "availabilityZone": "ap-northeast-3a",
+            "routeTableId": "rtb-007dd91cd0598f64c"
+          },
+          {
+            "subnetId": "subnet-0960af15f644bba84",
+            "cidr": "192.168.136.0/21",
+            "availabilityZone": "ap-northeast-3b",
+            "routeTableId": "rtb-007dd91cd0598f64c"
+          },
+          {
+            "subnetId": "subnet-037ecd208ac915d4f",
+            "cidr": "192.168.144.0/21",
+            "availabilityZone": "ap-northeast-3c",
+            "routeTableId": "rtb-007dd91cd0598f64c"
+          }
+        ]
+      },
+      {
+        "name": "Isolated",
+        "type": "Isolated",
+        "subnets": [
+          {
+            "subnetId": "subnet-090af827296c077ef",
+            "cidr": "192.168.192.0/21",
+            "availabilityZone": "ap-northeast-3a",
+            "routeTableId": "rtb-02068fade54ffc698"
+          },
+          {
+            "subnetId": "subnet-00fc88dd373408376",
+            "cidr": "192.168.200.0/21",
+            "availabilityZone": "ap-northeast-3b",
+            "routeTableId": "rtb-028855edab25199e7"
+          },
+          {
+            "subnetId": "subnet-0245f0adaf8438606",
+            "cidr": "192.168.208.0/21",
+            "availabilityZone": "ap-northeast-3c",
+            "routeTableId": "rtb-01edd556e8a86f8fe"
+          }
+        ]
+      }
+    ]
+  }
+}
