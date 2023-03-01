@@ -1,12 +1,14 @@
-import { Duration, Fn, RemovalPolicy, Stack } from "aws-cdk-lib";
+import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 import { EndpointType, HttpIntegration, RestApi, VpcLink } from "aws-cdk-lib/aws-apigateway";
-import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, HealthCheck, IMesh, IVirtualGateway, IVirtualService, Mesh, ServiceDiscovery, VirtualGatewayListener, VirtualNodeListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
-import { GatewayVpcEndpointAwsService, InterfaceVpcEndpointAwsService, IVpc, Peer, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
+import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, IMesh, IVirtualGateway, IVirtualService, Mesh, ServiceDiscovery, VirtualGatewayListener, VirtualNodeListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
+import { Alarm, ComparisonOperator, Metric, Stats } from "aws-cdk-lib/aws-cloudwatch";
+import { GatewayVpcEndpointAwsService, InterfaceVpcEndpointAwsService, Peer, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository } from "aws-cdk-lib/aws-ecr";
-import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver } from "aws-cdk-lib/aws-ecs";
-import { CfnLoadBalancer, INetworkLoadBalancer, NetworkLoadBalancer, NetworkTargetGroup, TargetType } from "aws-cdk-lib/aws-elasticloadbalancingv2";
+import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver, PropagatedTagSource } from "aws-cdk-lib/aws-ecs";
+import { INetworkLoadBalancer, NetworkLoadBalancer, NetworkTargetGroup, TargetType } from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
-import { ARecord, CfnRecordSet, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
+import { CfnHealthCheck, CfnRecordSet, CnameRecord, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone } from "aws-cdk-lib/aws-route53";
+import { HealthCheckType } from "aws-cdk-lib/aws-servicediscovery";
 import { Construct } from "constructs";
 
 export class RegionalStack extends Stack {
@@ -20,7 +22,7 @@ export class RegionalStack extends Stack {
 
         // prepare basic resources
         const vpc = Vpc.fromLookup(this, 'Vpc', { vpcId: props.vpcId });
-        const cluster = new Cluster(this, 'Cluster', { vpc, containerInsights: true, });
+        const cluster = new Cluster(this, 'Cluster', { vpc, containerInsights: true, defaultCloudMapNamespace: { name: `${props.region}.local` } });
         const hostedZone = PrivateHostedZone.fromHostedZoneAttributes(this, 'ServiceMeshZone', props.serviceMeshZone)
         const mesh = new Mesh(this, 'Mesh');
 
@@ -37,16 +39,15 @@ export class RegionalStack extends Stack {
         vpc.addInterfaceEndpoint('ec2msg', { service: InterfaceVpcEndpointAwsService.EC2_MESSAGES });
 
         // deploy load balancer
-        const listenerPort = 3001;
-        const loadBalancer = this.deployNetworkLoadBalancer({
-            region: props.region, vpc, hostedZone,
+        const loadBalancer = new NetworkLoadBalancer(scope, 'NetworkLoadBalancer', {
+            vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED }, internetFacing: false,
         });
 
         // deploy services
         const services = {} as { [seviceName: string]: IVirtualService };
         props.serviceNames.forEach((serviceName, i) => {
             const { service } = this.deployService({
-                region: props.region, serviceName, hostedZone, loadBalancer, listnerPort: listenerPort + i, cluster, mesh,
+                region: props.region, serviceName, hostedZone, cluster, mesh,
             });
             services[serviceName] = service;
         });
@@ -60,42 +61,6 @@ export class RegionalStack extends Stack {
         this.deployApiEndpoints({
             loadBalancer, serviceNames: props.serviceNames, serviceMeshZoneName: props.serviceMeshZone.zoneName,
         });
-    }
-
-    private deployNetworkLoadBalancer(args: {
-        region: string,
-        vpc: IVpc,
-        hostedZone: IPrivateHostedZone,
-    }): INetworkLoadBalancer {
-        const scope = new Construct(this, 'MeshEndpoints');
-
-        // provision loadbalancer
-        const loadBalancer = new NetworkLoadBalancer(scope, 'NetworkLoadBalancer', {
-            vpc: args.vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED }, internetFacing: false,
-        });
-        const cfnLb = loadBalancer.node.defaultChild as CfnLoadBalancer;
-        cfnLb.subnets = undefined;
-        cfnLb.subnetMappings = args.vpc.isolatedSubnets.map(sub => {
-            const ip = Fn.select(0, Fn.split('/', Fn.select(1, Fn.cidr(sub.ipv4CidrBlock, 2, '9'))));
-            return {
-                subnetId: sub.subnetId,
-                privateIPv4Address: ip,
-            };
-        });
-
-        // register dns record
-        const addresses = (cfnLb.subnetMappings as CfnLoadBalancer.SubnetMappingProperty[]).map(m => m.privateIPv4Address!);
-        const record = new ARecord(scope, 'EndpointRecord', {
-            zone: args.hostedZone, recordName: '*',
-            target: RecordTarget.fromIpAddresses(...addresses),
-            ttl: Duration.minutes(1),
-        });
-        const cfnRS = record.node.defaultChild as CfnRecordSet;
-        cfnRS.setIdentifier = args.region;
-        cfnRS.weight = 1;
-
-        // expose
-        return loadBalancer;
     }
 
     private deployApiEndpoints(args: {
@@ -205,21 +170,19 @@ export class RegionalStack extends Stack {
         region: string,
         serviceName: string,
         hostedZone: IPrivateHostedZone,
-        loadBalancer: INetworkLoadBalancer,
-        listnerPort: number,
         cluster: ICluster,
         mesh: IMesh,
     }): {
         service: IVirtualService,
     } {
         const scope = new Construct(this, args.serviceName);
-        const hostname = `${args.serviceName}.${args.hostedZone.zoneName}`;
-        const containerPort = args.listnerPort;
+        const hostname = `${args.serviceName}.${args.cluster.defaultCloudMapNamespace!.namespaceName}`;
+        const containerPort = 3000;
 
         // define mesh
         const node = args.mesh.addVirtualNode(args.serviceName, {
             serviceDiscovery: ServiceDiscovery.dns(hostname, DnsResponseType.ENDPOINTS),
-            listeners: [VirtualNodeListener.http({ port: containerPort, healthCheck: HealthCheck.http({ path: '/health' }) }),],
+            listeners: [VirtualNodeListener.http({ port: containerPort })],
             accessLog: AccessLog.fromFilePath('/dev/stdout'),
         });
         const service = new VirtualService(scope, 'VirtualService', {
@@ -288,7 +251,9 @@ export class RegionalStack extends Stack {
         });
         web.addContainerDependencies({ container: envoy, condition: ContainerDependencyCondition.HEALTHY });
         node.grantStreamAggregatedResources(taskDefinition.taskRole);
-        const taskSet = new FargateService(scope, 'TaskSet', { taskDefinition, cluster: args.cluster, });
+        const taskSet = new FargateService(scope, 'TaskSet', {
+            taskDefinition, cluster: args.cluster, cloudMapOptions: { name: args.serviceName }
+        });
         taskSet.connections.allowFrom(Peer.anyIpv4(), Port.tcp(containerPort));
 
         // connect tasks and load balancer
@@ -297,10 +262,43 @@ export class RegionalStack extends Stack {
             targetType: TargetType.IP, targets: [taskSet],
             deregistrationDelay: Duration.seconds(0),
         });
-        args.loadBalancer.addListener(`${args.serviceName}Listner`, {
-            port: args.listnerPort,
-            defaultTargetGroups: [targetGroup],
+
+        // healthcheck
+        const alarm = new Alarm(scope, 'Alarm', {
+            metric: new Metric({
+                namespace: 'ECS/InsightsContainerInsights',
+                metricName: 'RunningTaskCount',
+                dimensionsMap: {
+                    ClusterName: args.cluster.clusterName,
+                    ServiceName: taskSet.serviceName,
+                }
+            }).with({ period: Duration.minutes(1), statistic: Stats.AVERAGE, }),
+            threshold: 1,
+            comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
+            evaluationPeriods: 1,
+            datapointsToAlarm: 1,
         });
+        const healtcheck = new CfnHealthCheck(scope, 'HealthCheck', {
+            healthCheckConfig: {
+                type: 'CLOUDWATCH_METRIC',
+                alarmIdentifier: {
+                    region: args.region,
+                    name: alarm.alarmName,
+                },
+                insufficientDataHealthStatus: 'LastKnownStatus',
+            }
+        });
+
+        // register dns records
+        const record = new CnameRecord(scope, 'EndpointRecord', {
+            zone: args.hostedZone, recordName: args.serviceName,
+            domainName: hostname,
+            ttl: Duration.minutes(1),
+        });
+        const cfnRS = record.node.defaultChild as CfnRecordSet;
+        cfnRS.setIdentifier = args.region;
+        cfnRS.region = args.region;
+        cfnRS.healthCheckId = healtcheck.ref;
 
         // expose
         return {
