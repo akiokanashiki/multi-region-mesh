@@ -4,11 +4,10 @@ import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec
 import { Alarm, ComparisonOperator, Metric, Stats } from "aws-cdk-lib/aws-cloudwatch";
 import { GatewayVpcEndpointAwsService, InterfaceVpcEndpointAwsService, Peer, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository } from "aws-cdk-lib/aws-ecr";
-import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver, PropagatedTagSource } from "aws-cdk-lib/aws-ecs";
+import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver } from "aws-cdk-lib/aws-ecs";
 import { INetworkLoadBalancer, NetworkLoadBalancer, NetworkTargetGroup, TargetType } from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
 import { CfnHealthCheck, CfnRecordSet, CnameRecord, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone } from "aws-cdk-lib/aws-route53";
-import { HealthCheckType } from "aws-cdk-lib/aws-servicediscovery";
 import { Construct } from "constructs";
 
 export class RegionalStack extends Stack {
