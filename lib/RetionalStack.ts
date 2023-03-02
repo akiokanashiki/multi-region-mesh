@@ -6,7 +6,9 @@ import { Repository } from "aws-cdk-lib/aws-ecr";
 import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver } from "aws-cdk-lib/aws-ecs";
 import { INetworkLoadBalancer, NetworkLoadBalancer, NetworkTargetGroup, TargetType } from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
-import { CfnRecordSet, CnameRecord, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone } from "aws-cdk-lib/aws-route53";
+import { ARecord, CfnRecordSet, CnameRecord, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
+import { LoadBalancerTarget } from "aws-cdk-lib/aws-route53-targets";
+import cluster from "cluster";
 import { Construct } from "constructs";
 
 export class RegionalStack extends Stack {
@@ -20,10 +22,7 @@ export class RegionalStack extends Stack {
 
         // prepare basic resources
         const vpc = Vpc.fromLookup(this, 'Vpc', { vpcId: props.vpcId });
-        const cluster = new Cluster(this, 'Cluster', {
-            vpc, defaultCloudMapNamespace: { name: `${props.region}.local` },
-            // containerInsights: true,
-        });
+        const cluster = new Cluster(this, 'Cluster', { vpc, });
         const hostedZone = PrivateHostedZone.fromHostedZoneAttributes(this, 'ServiceMeshZone', props.serviceMeshZone)
         const mesh = new Mesh(this, 'Mesh');
 
@@ -41,7 +40,8 @@ export class RegionalStack extends Stack {
 
         // deploy load balancer
         const loadBalancer = new NetworkLoadBalancer(this, 'NetworkLoadBalancer', {
-            vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED }, internetFacing: false,
+            vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
+            internetFacing: false, crossZoneEnabled: true,
         });
 
         // deploy services
@@ -178,41 +178,17 @@ export class RegionalStack extends Stack {
     } {
         const scope = new Construct(this, args.serviceName);
         const serviceDomain = `${args.serviceName}.${args.hostedZone.zoneName}`;
-        const hostname = `${args.serviceName}.${args.cluster.defaultCloudMapNamespace!.namespaceName}`;
         const containerPort = 3000;
 
         // define mesh
         const node = args.mesh.addVirtualNode(`${args.serviceName}Node`, {
-            serviceDiscovery: ServiceDiscovery.dns(serviceDomain, DnsResponseType.ENDPOINTS),
-            listeners: [VirtualNodeListener.http({
-                port: containerPort, healthCheck: HealthCheck.http({
-                    path: '/health',
-                    interval: Duration.seconds(5),
-                    unhealthyThreshold: 2,
-                    healthyThreshold: 3,
-                    timeout: Duration.seconds(2),
-                })
-            })],
+            serviceDiscovery: ServiceDiscovery.dns(serviceDomain, DnsResponseType.LOAD_BALANCER),
+            listeners: [VirtualNodeListener.http({ port: containerPort, })],
             accessLog: AccessLog.fromFilePath('/dev/stdout'),
-        });
-        const router = args.mesh.addVirtualRouter(`${args.serviceName}Router`, {
-            listeners: [VirtualRouterListener.http(containerPort)],
-        });
-        router.addRoute('route', {
-            routeSpec: RouteSpec.http({
-                weightedTargets: [{ virtualNode: node }],
-                timeout: { perRequest: Duration.seconds(30) },
-                retryPolicy: {
-                    tcpRetryEvents: [TcpRetryEvent.CONNECTION_ERROR],
-                    httpRetryEvents: [HttpRetryEvent.STREAM_ERROR, HttpRetryEvent.GATEWAY_ERROR],
-                    retryAttempts: 5,
-                    retryTimeout: Duration.seconds(2),
-                }
-            })
         });
         const service = new VirtualService(scope, 'VirtualService', {
             virtualServiceName: serviceDomain,
-            virtualServiceProvider: VirtualServiceProvider.virtualRouter(router),
+            virtualServiceProvider: VirtualServiceProvider.virtualNode(node),
         });
 
         // deploy container
@@ -276,49 +252,34 @@ export class RegionalStack extends Stack {
         });
         web.addContainerDependencies({ container: envoy, condition: ContainerDependencyCondition.HEALTHY });
         node.grantStreamAggregatedResources(taskDefinition.taskRole);
-        const taskSet = new FargateService(scope, 'TaskSet', {
-            taskDefinition, cluster: args.cluster, cloudMapOptions: { name: args.serviceName }
-        });
+        const taskSet = new FargateService(scope, 'TaskSet', { taskDefinition, cluster: args.cluster, });
         taskSet.connections.allowFrom(Peer.anyIpv4(), Port.tcp(containerPort));
 
-        // healthcheck
-        /*
-        const alarm = new Alarm(scope, 'Alarm', {
-            metric: new Metric({
-                namespace: 'ECS/InsightsContainerInsights',
-                metricName: 'RunningTaskCount',
-                dimensionsMap: {
-                    ClusterName: args.cluster.clusterName,
-                    ServiceName: taskSet.serviceName,
-                }
-            }).with({ period: Duration.minutes(1), statistic: Stats.AVERAGE, }),
-            threshold: 1,
-            comparisonOperator: ComparisonOperator.LESS_THAN_THRESHOLD,
-            evaluationPeriods: 1,
-            datapointsToAlarm: 1,
+        // connect tasks and load balancer
+        const loadBalancer = new NetworkLoadBalancer(scope, 'NetworkLoadBalancer', {
+            vpc: args.cluster.vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
+            internetFacing: false, crossZoneEnabled: true,
         });
-        const healtcheck = new CfnHealthCheck(scope, 'HealthCheck', {
-            healthCheckConfig: {
-                type: 'CLOUDWATCH_METRIC',
-                alarmIdentifier: {
-                    region: args.region,
-                    name: alarm.alarmName,
-                },
-                insufficientDataHealthStatus: 'LastKnownStatus',
-            }
+        const targetGroup = new NetworkTargetGroup(scope, 'TargetGroup', {
+            vpc: args.cluster.vpc, port: containerPort,
+            targetType: TargetType.IP, targets: [taskSet],
+            deregistrationDelay: Duration.seconds(0),
         });
-        */
+        loadBalancer.addListener(`${args.serviceName}Listener`, {
+            port: containerPort,
+            defaultTargetGroups: [targetGroup],
+        });
 
         // register dns records
-        const record = new CnameRecord(scope, 'EndpointRecord', {
+        const record = new ARecord(scope, 'EndpointRecord', {
             zone: args.hostedZone, recordName: args.serviceName,
-            domainName: hostname,
+            target: RecordTarget.fromAlias(new LoadBalancerTarget(loadBalancer)),
             ttl: Duration.minutes(1),
         });
         const cfnRS = record.node.defaultChild as CfnRecordSet;
         cfnRS.setIdentifier = args.region;
         cfnRS.region = args.region;
-        // cfnRS.healthCheckId = healtcheck.ref;
+        cfnRS.addPropertyOverride('AliasTarget.EvaluateTargetHealth', true);
 
         // expose
         return {
