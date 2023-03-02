@@ -1,7 +1,7 @@
 import express from 'express';
 import morgan from 'morgan';
 
-const port = process.env.SERVER_PORT;
+const port = process.env.SERVER_PORT | 3000;
 
 const app = express();
 app.use(morgan(`combined`));
@@ -18,5 +18,5 @@ app.get('/dump', (req, res) => {
 });
 
 const server = app.listen(port, '0.0.0.0', () => {
-    console.log(`start at .${port}`);
+    console.log(`start at ${port}`);
 });
