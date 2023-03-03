@@ -1,14 +1,13 @@
 import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 import { EndpointType, HttpIntegration, RestApi, VpcLink } from "aws-cdk-lib/aws-apigateway";
-import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, HealthCheck, HttpRetryEvent, IMesh, IVirtualGateway, IVirtualService, Mesh, RouteSpec, ServiceDiscovery, TcpRetryEvent, VirtualGatewayListener, VirtualNodeListener, VirtualRouterListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
+import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, HttpRetryEvent, IMesh, IVirtualGateway, IVirtualService, Mesh, RouteSpec, ServiceDiscovery, TcpRetryEvent, VirtualGatewayListener, VirtualNodeListener, VirtualRouterListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
 import { GatewayVpcEndpointAwsService, InterfaceVpcEndpointAwsService, Peer, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository } from "aws-cdk-lib/aws-ecr";
 import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver } from "aws-cdk-lib/aws-ecs";
 import { INetworkLoadBalancer, NetworkLoadBalancer, NetworkTargetGroup, TargetType } from "aws-cdk-lib/aws-elasticloadbalancingv2";
 import { LogGroup, RetentionDays } from "aws-cdk-lib/aws-logs";
-import { ARecord, CfnRecordSet, CnameRecord, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
+import { ARecord, CfnRecordSet, HostedZoneAttributes, IPrivateHostedZone, PrivateHostedZone, RecordTarget } from "aws-cdk-lib/aws-route53";
 import { LoadBalancerTarget } from "aws-cdk-lib/aws-route53-targets";
-import cluster from "cluster";
 import { Construct } from "constructs";
 
 export class RegionalStack extends Stack {
@@ -186,9 +185,23 @@ export class RegionalStack extends Stack {
             listeners: [VirtualNodeListener.http({ port: containerPort, })],
             accessLog: AccessLog.fromFilePath('/dev/stdout'),
         });
+        const router = args.mesh.addVirtualRouter(`${args.serviceName}Router`, {
+            listeners: [VirtualRouterListener.http(80)],
+        });
+        router.addRoute('route', {
+            routeSpec: RouteSpec.http({
+                retryPolicy: {
+                    retryTimeout: Duration.seconds(2),
+                    retryAttempts: 5,
+                    tcpRetryEvents: [TcpRetryEvent.CONNECTION_ERROR],
+                    httpRetryEvents: [HttpRetryEvent.GATEWAY_ERROR, HttpRetryEvent.STREAM_ERROR],
+                },
+                weightedTargets: [{ weight: 1, virtualNode: node }],
+            })
+        })
         const service = new VirtualService(scope, 'VirtualService', {
             virtualServiceName: serviceDomain,
-            virtualServiceProvider: VirtualServiceProvider.virtualNode(node),
+            virtualServiceProvider: VirtualServiceProvider.virtualRouter(router),
         });
 
         // deploy container
@@ -255,7 +268,7 @@ export class RegionalStack extends Stack {
         const taskSet = new FargateService(scope, 'TaskSet', { taskDefinition, cluster: args.cluster, });
         taskSet.connections.allowFrom(Peer.anyIpv4(), Port.tcp(containerPort));
 
-        // connect tasks and load balancer
+        // provision load balancer and bind tasks
         const loadBalancer = new NetworkLoadBalancer(scope, 'NetworkLoadBalancer', {
             vpc: args.cluster.vpc, vpcSubnets: { subnetType: SubnetType.PRIVATE_ISOLATED },
             internetFacing: false, crossZoneEnabled: true,
