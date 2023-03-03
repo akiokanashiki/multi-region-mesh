@@ -1,6 +1,6 @@
 import { Duration, RemovalPolicy, Stack } from "aws-cdk-lib";
 import { EndpointType, HttpIntegration, RestApi, VpcLink } from "aws-cdk-lib/aws-apigateway";
-import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, HttpRetryEvent, IMesh, IVirtualGateway, IVirtualService, Mesh, RouteSpec, ServiceDiscovery, TcpRetryEvent, VirtualGatewayListener, VirtualNodeListener, VirtualRouterListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
+import { AccessLog, DnsResponseType, GatewayRouteHostnameMatch, GatewayRouteSpec, HeaderMatch, HealthCheck, HttpRetryEvent, IMesh, IVirtualGateway, IVirtualService, Mesh, RouteSpec, ServiceDiscovery, TcpRetryEvent, VirtualGatewayListener, VirtualNodeListener, VirtualRouterListener, VirtualService, VirtualServiceProvider } from "aws-cdk-lib/aws-appmesh";
 import { GatewayVpcEndpointAwsService, InterfaceVpcEndpointAwsService, Peer, Port, SubnetType, Vpc } from "aws-cdk-lib/aws-ec2";
 import { Repository } from "aws-cdk-lib/aws-ecr";
 import { AppMeshProxyConfiguration, Cluster, ContainerDependencyCondition, ContainerImage, FargateService, FargateTaskDefinition, ICluster, LogDriver } from "aws-cdk-lib/aws-ecs";
@@ -182,11 +182,14 @@ export class RegionalStack extends Stack {
         // define mesh
         const node = args.mesh.addVirtualNode(`${args.serviceName}Node`, {
             serviceDiscovery: ServiceDiscovery.dns(serviceDomain, DnsResponseType.LOAD_BALANCER),
-            listeners: [VirtualNodeListener.http({ port: containerPort, })],
+            listeners: [VirtualNodeListener.http({
+                port: containerPort,
+                healthCheck: HealthCheck.http({ path: '/health' })
+            })],
             accessLog: AccessLog.fromFilePath('/dev/stdout'),
         });
         const router = args.mesh.addVirtualRouter(`${args.serviceName}Router`, {
-            listeners: [VirtualRouterListener.http(80)],
+            listeners: [VirtualRouterListener.http(containerPort)],
         });
         router.addRoute('route', {
             routeSpec: RouteSpec.http({
